@@ -18,7 +18,7 @@ from supernet_engine import train_one_epoch, evaluate
 from lib.samplers import RASampler
 from lib import utils
 from lib.config import cfg, update_config_from_file
-from model.supernet_transformer import Vision_TransformerSuper
+from model.supernet_transformer import Vision_TransformerSuper, LinearEvaluation, MaxLayer
 
 
 def get_args_parser():
@@ -37,6 +37,16 @@ def get_args_parser():
     parser.add_argument('--gp', action='store_true')
     parser.add_argument('--change_qkv', action='store_true')
     parser.add_argument('--max_relative_position', type=int, default=14, help='max distance in relative position embedding')
+    parser.add_argument('--know_distill', action='store_true')
+    parser.add_argument('--no-know_distill', action='store_false', dest='know_distill')
+    parser.set_defaults(know_distill=True)
+    parser.add_argument('--linear_eval', action='store_true')
+    parser.add_argument('--no-linear_eval', action='store_false', dest='linear_eval')
+    parser.set_defaults(linear_eval=False)
+    parser.add_argument('--sandwich_training', default=1, type=int)
+    parser.add_argument('--max_kd', action='store_true')
+    parser.add_argument('--no-max_kd', action='store_false', dest='max_kd')
+    parser.set_defaults(max_kd=False)
 
     # Model parameters
     parser.add_argument('--model', default='', type=str, metavar='MODEL',
@@ -148,7 +158,7 @@ def get_args_parser():
     # Dataset parameters
     parser.add_argument('--data-path', default='./data/imagenet/', type=str,
                         help='dataset path')
-    parser.add_argument('--data-set', default='IMNET', choices=['CIFAR', 'IMNET', 'INAT', 'INAT19'],
+    parser.add_argument('--data-set', default='IMNET', choices=['CIFAR10', 'IMNET', 'INAT', 'INAT19'],
                         type=str, help='Image Net dataset path')
     parser.add_argument('--inat-category', default='name',
                         choices=['kingdom', 'phylum', 'class', 'order', 'supercategory', 'family', 'genus', 'name'],
@@ -265,7 +275,8 @@ def main(args):
                                     change_qkv=args.change_qkv, abs_pos=not args.no_abs_pos)
 
     choices = {'num_heads': cfg.SEARCH_SPACE.NUM_HEADS, 'mlp_ratio': cfg.SEARCH_SPACE.MLP_RATIO,
-               'embed_dim': cfg.SEARCH_SPACE.EMBED_DIM , 'depth': cfg.SEARCH_SPACE.DEPTH}
+               'embed_dim': cfg.SEARCH_SPACE.EMBED_DIM , 'depth': cfg.SEARCH_SPACE.DEPTH,
+               'mul': cfg.SEARCH_SPACE.MUL}
 
     model.to(device)
     if args.teacher_model:
@@ -342,6 +353,37 @@ def main(args):
     print("Start training")
     start_time = time.time()
     max_accuracy = 0.0
+    if args.know_distill:
+        print("Knowledge Distillation Mode")
+        if args.max_kd:
+            print("Max KD Mode")
+            max_layer = MaxLayer(dims=0).to(device)
+        else:
+            print("Random KD Mode")
+    if args.linear_eval:
+        linear_layer = LinearEvaluation(args.nb_classes).to(device)
+        param_grp = []
+        for v in linear_layer.modules():
+            if hasattr(v, 'bias') and isinstance(v.bias, torch.nn.Parameter):
+                param_grp.append(v.bias)
+            if hasattr(v, 'weight') and isinstance(v.weight, torch.nn.Parameter):
+                param_grp.append(v.weight)
+        '''
+        if hasattr(linear_layer, 'bias') and isinstance(linear_layer.bias, nn.Parameter):
+            param_grp.append(linear_layer.bias)
+        if hasattr(linear_layer, 'weight') and isinstance(linear_layer.weight, nn.Parameter):
+            param_grp.append(linear_layer.weight)
+        '''
+
+        optimizer.add_param_group({'params':param_grp})
+        print("Linear Evaluation Mode")
+        print('Added Parameter Group:', param_grp)
+    if args.sandwich_training > 1:
+        print('Sandwich Training Mode')
+    if True:
+        print('KL/RKL Sampling Learnable Mode')
+        arch_weight = torch.nn.Parameter(torch.zeros(2, requires_grad=True, device=device))
+        optimizer.add_param_group({'params':arch_weight})
 
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
@@ -354,6 +396,11 @@ def main(args):
             amp=args.amp, teacher_model=teacher_model,
             teach_loss=teacher_loss,
             choices=choices, mode = args.mode, retrain_config=retrain_config,
+            know_distill=args.know_distill,
+            linear_eval = linear_layer if args.linear_eval else None,
+            sandwich_training=args.sandwich_training,
+            max_kd=max_layer if args.max_kd else None, random_kd=not args.max_kd,
+            arch_weight=arch_weight,
         )
 
         lr_scheduler.step(epoch)
