@@ -12,8 +12,6 @@ from model.utils import trunc_normal_
 from model.utils import DropPath
 import numpy as np
 
-from numba import vectorize, njit
-
 
 def gelu(x: torch.Tensor) -> torch.Tensor:
     if hasattr(torch.nn.functional, 'gelu'):
@@ -26,7 +24,8 @@ class Vision_TransformerSuper(nn.Module):
 
     def __init__(self, img_size=224, patch_size=16, in_chans=3, num_classes=1000, embed_dim=768, depth=12,
                  num_heads=12, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop_rate=0., attn_drop_rate=0.,
-                 drop_path_rate=0., pre_norm=True, scale=False, gp=False, relative_position=False, change_qkv=False, abs_pos = True, max_relative_position=14):
+                 drop_path_rate=0., pre_norm=True, scale=False, gp=False, relative_position=False, change_qkv=False, abs_pos = True, max_relative_position=14,
+                 early_conv=False):
         super(Vision_TransformerSuper, self).__init__()
         # the configs of super arch
         self.super_embed_dim = embed_dim
@@ -57,15 +56,22 @@ class Vision_TransformerSuper(nn.Module):
                         econv_list.append(ops_econv)
                 prev_out = e_out
             return nn.Sequential(*econv_list)
-        self.early_conv = create_earlyconv(self.in_chans, self.out_ch_econv, self.stride_econv, self.kernel_econv)
 
-        img_down = 1
-        for each_stride in self.stride_econv:
-            img_down *= each_stride
+        if early_conv:
+            self.early_conv = create_earlyconv(self.in_chans, self.out_ch_econv, self.stride_econv, self.kernel_econv)
+            patch_in_channel = self.out_ch_econv[-1]
+            img_down = 1
+            for each_stride in self.stride_econv:
+                img_down *= each_stride
+
+        else:
+            self.early_conv = nn.Identity()
+            patch_in_channel = in_chans
+            img_down = 1
+
 
         self.patch_embed_super = PatchembedSuper(img_size=img_size//img_down, patch_size=patch_size//img_down,
-                                                 in_chans=self.out_ch_econv[-1], embed_dim=embed_dim)
-                                                 # in_chans=in_chans, embed_dim=embed_dim)
+                                                 in_chans=patch_in_channel, embed_dim=embed_dim)
         self.gp = gp
 
         # configs for the sampled subTransformer
@@ -136,7 +142,6 @@ class Vision_TransformerSuper(nn.Module):
         self.sample_dropout = calc_dropout(self.super_dropout, self.sample_embed_dim[0], self.super_embed_dim)
         self.patch_embed_super.set_sample_config(self.sample_embed_dim[0])
         self.sample_output_dim = [out_dim for out_dim in self.sample_embed_dim[1:]] + [self.sample_embed_dim[-1]]
-        self.sample_mul = config['mul']
         for i, blocks in enumerate(self.blocks):
             # not exceed sample layer number
             if i < self.sample_layer_num:
@@ -149,7 +154,6 @@ class Vision_TransformerSuper(nn.Module):
                                         sample_dropout=sample_dropout,
                                         sample_out_dim=self.sample_output_dim[i],
                                         sample_attn_dropout=sample_attn_dropout,
-                                        sample_mul=self.sample_mul[i],
                                         )
             # exceeds sample layer number
             else:
@@ -350,7 +354,7 @@ class TransformerEncoderLayer(nn.Module):
         self.fc2 = LinearSuper(super_in_dim=self.super_ffn_embed_dim_this_layer, super_out_dim=self.super_embed_dim)
 
 
-    def set_sample_config(self, is_identity_layer, sample_embed_dim=None, sample_mlp_ratio=None, sample_num_heads=None, sample_dropout=None, sample_attn_dropout=None, sample_out_dim=None, sample_mul=None):
+    def set_sample_config(self, is_identity_layer, sample_embed_dim=None, sample_mlp_ratio=None, sample_num_heads=None, sample_dropout=None, sample_attn_dropout=None, sample_out_dim=None):
 
         if is_identity_layer:
             self.is_identity_layer = True
@@ -368,8 +372,7 @@ class TransformerEncoderLayer(nn.Module):
         self.sample_attn_dropout = sample_attn_dropout
         self.attn_layer_norm.set_sample_config(sample_embed_dim=self.sample_embed_dim)
 
-        self.sample_mul = sample_mul
-        self.attn.set_sample_config(sample_q_embed_dim=self.sample_num_heads_this_layer*64, sample_num_heads=self.sample_num_heads_this_layer, sample_in_embed_dim=self.sample_embed_dim, sample_mul=sample_mul)
+        self.attn.set_sample_config(sample_q_embed_dim=self.sample_num_heads_this_layer*64, sample_num_heads=self.sample_num_heads_this_layer, sample_in_embed_dim=self.sample_embed_dim)
 
         self.fc1.set_sample_config(sample_in_dim=self.sample_embed_dim, sample_out_dim=self.sample_ffn_embed_dim_this_layer)
         self.fc2.set_sample_config(sample_in_dim=self.sample_ffn_embed_dim_this_layer, sample_out_dim=self.sample_out_dim)
@@ -402,7 +405,7 @@ class TransformerEncoderLayer(nn.Module):
         # compute attn
         # start_time = time.time()
 
-        sample_prob = torch.nn.functional.softmax(torch.concat([self.alpha, self.beta]))
+        sample_prob = torch.nn.functional.softmax(torch.cat([self.alpha, self.beta]))
         if self.training:
             sample_choice = [torch.bernoulli(sample_prob[0])]
         else:

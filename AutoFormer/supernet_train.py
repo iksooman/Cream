@@ -37,16 +37,17 @@ def get_args_parser():
     parser.add_argument('--gp', action='store_true')
     parser.add_argument('--change_qkv', action='store_true')
     parser.add_argument('--max_relative_position', type=int, default=14, help='max distance in relative position embedding')
+
     parser.add_argument('--know_distill', action='store_true')
     parser.add_argument('--no-know_distill', action='store_false', dest='know_distill')
-    parser.set_defaults(know_distill=True)
+    parser.set_defaults(know_distill=False)
+    parser.add_argument('--earlyconv', action='store_true')
+    parser.add_argument('--no-earlyconv', action='store_false', dest='early conv')
+    parser.set_defaults(earlyconv=False)
     parser.add_argument('--linear_eval', action='store_true')
     parser.add_argument('--no-linear_eval', action='store_false', dest='linear_eval')
     parser.set_defaults(linear_eval=False)
     parser.add_argument('--sandwich_training', default=1, type=int)
-    parser.add_argument('--max_kd', action='store_true')
-    parser.add_argument('--no-max_kd', action='store_false', dest='max_kd')
-    parser.set_defaults(max_kd=False)
 
     # Model parameters
     parser.add_argument('--model', default='', type=str, metavar='MODEL',
@@ -272,11 +273,11 @@ def main(args):
                                     num_classes=args.nb_classes,
                                     max_relative_position=args.max_relative_position,
                                     relative_position=args.relative_position,
-                                    change_qkv=args.change_qkv, abs_pos=not args.no_abs_pos)
+                                    change_qkv=args.change_qkv, abs_pos=not args.no_abs_pos,
+                                    early_conv=args.earlyconv)
 
     choices = {'num_heads': cfg.SEARCH_SPACE.NUM_HEADS, 'mlp_ratio': cfg.SEARCH_SPACE.MLP_RATIO,
-               'embed_dim': cfg.SEARCH_SPACE.EMBED_DIM , 'depth': cfg.SEARCH_SPACE.DEPTH,
-               'mul': cfg.SEARCH_SPACE.MUL}
+               'embed_dim': cfg.SEARCH_SPACE.EMBED_DIM , 'depth': cfg.SEARCH_SPACE.DEPTH}
 
     model.to(device)
     if args.teacher_model:
@@ -350,16 +351,17 @@ def main(args):
         print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
         return
 
+    choice_check = len(set([len(tt) for tt in choices.values()]))
+    sample_from_uniform = False
+    if choice_check > 1:
+        print("Search Space has different numbers of choices. Subnets are sampled from uniform distribution.")
+        sample_from_uniform = True
+
     print("Start training")
     start_time = time.time()
     max_accuracy = 0.0
     if args.know_distill:
         print("Knowledge Distillation Mode")
-        if args.max_kd:
-            print("Max KD Mode")
-            max_layer = MaxLayer(dims=0).to(device)
-        else:
-            print("Random KD Mode")
     if args.linear_eval:
         linear_layer = LinearEvaluation(args.nb_classes).to(device)
         param_grp = []
@@ -399,8 +401,7 @@ def main(args):
             know_distill=args.know_distill,
             linear_eval = linear_layer if args.linear_eval else None,
             sandwich_training=args.sandwich_training,
-            max_kd=max_layer if args.max_kd else None, random_kd=not args.max_kd,
-            arch_weight=arch_weight,
+            arch_weight=arch_weight, sample_from_uniform=sample_from_uniform,
         )
 
         lr_scheduler.step(epoch)

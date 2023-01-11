@@ -13,7 +13,7 @@ from .dynamic_ops import DynamicSeparableConv2d, DynamicPointConv2d, DynamicBatc
 from .nn_utils import int2list, get_net_device, copy_bn, build_activation, make_divisible
 from .nn_base import MyModule, MyNetwork
 
-
+# rebase AttentiveNAS / synchronize search space with autoformer(kernel -> mlp, expand -> head) / AttentiveNAS BatchNorm Statistics in Inference
 class DynamicMBConvLayer(MyModule):
 
     def __init__(self, in_channel_list, out_channel_list,
